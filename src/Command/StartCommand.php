@@ -11,6 +11,7 @@ namespace KimaiConsole\Command;
 
 use Swagger\Client\ApiException;
 use Swagger\Client\Model\TimesheetEditForm;
+use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Output\OutputInterface;
@@ -25,18 +26,48 @@ final class StartCommand extends BaseCommand
         $this
             ->setName('start')
             ->setDescription('Starts a new timesheet')
-            ->setHelp('This command lets you start a new timesheet')
+            ->setHelp('This command lets you start a new timesheet and optionally end it immediately.')
             ->addOption('customer', 'c', InputOption::VALUE_OPTIONAL, 'The customer to filter the project list, can be an ID or a search term or empty (you will be prompted for a customer).')
             ->addOption('project', 'p', InputOption::VALUE_OPTIONAL, 'The project to use, can be an ID or a search term or empty. You will be prompted for the project.')
             ->addOption('activity', 'a', InputOption::VALUE_OPTIONAL, 'The activity ID to use')
             ->addOption('tags', 't', InputOption::VALUE_OPTIONAL, 'Comma separated list of tag names')
             ->addOption('description', 'd', InputOption::VALUE_OPTIONAL, 'The timesheet description')
+            ->addOption('begin', 'b', InputOption::VALUE_OPTIONAL, 'The begin (date and) time in a format supported by PHP')
+            ->addOption('end', 'e', InputOption::VALUE_OPTIONAL, 'The end (date and) time in a format supported by PHP')
+            ->addOption('timezone', 'z', InputOption::VALUE_OPTIONAL, 'IANA timezone (e.g. Asia/Kolkata) for interpreting --begin/--end. Falls back to the PHP default timezone if omitted.')
         ;
     }
 
     protected function execute(InputInterface $input, OutputInterface $output): int
     {
         $io = new SymfonyStyle($input, $output);
+
+        $begin = $input->getOption('begin');
+        $end = $input->getOption('end');
+
+        try {
+            $zone = $this->resolveTimezone($input->getOption('timezone'));
+
+            if (null !== $begin) {
+                $begin = $this->parseDateTime((string) $begin, 'begin', $zone);
+            }
+
+            if (null !== $end) {
+                if (null === $begin) {
+                    throw new \InvalidArgumentException('Option "end" requires "begin" to be set.');
+                }
+
+                $end = $this->parseDateTime((string) $end, 'end', $zone);
+
+                if ($begin > $end) {
+                    throw new \InvalidArgumentException('Value for field "end" must not be earlier than "begin".');
+                }
+            }
+        } catch (\InvalidArgumentException $ex) {
+            $io->error($ex->getMessage());
+
+            return Command::FAILURE;
+        }
 
         $customer = null;
 
@@ -81,6 +112,14 @@ final class StartCommand extends BaseCommand
             $form->setDescription($description);
         }
 
+        if (null !== $begin) {
+            $form->setBegin($begin);
+        }
+
+        if (null !== $end) {
+            $form->setEnd($end);
+        }
+
         try {
             $timesheet = $api->postPostTimesheet($form);
         } catch (ApiException $ex) {
@@ -89,9 +128,13 @@ final class StartCommand extends BaseCommand
             return 1;
         }
 
+        // running timesheets have no end, despite the generated model's @return
+        $timesheetEnd = $timesheet->getEnd();
+
         $fields = [
             'ID' => $timesheet->getId(),
             'Begin' => $timesheet->getBegin()->format(\DateTime::ISO8601),
+            'End' => null !== $timesheetEnd ? $timesheetEnd->format(\DateTime::ISO8601) : null,
             'Description' => $timesheet->getDescription(),
             'Tags' => implode(PHP_EOL, $timesheet->getTags()),
             'Customer' => $customer->getName(),
@@ -99,7 +142,7 @@ final class StartCommand extends BaseCommand
             'Activity' => $activity->getName(),
         ];
 
-        $io->success('Started timesheet');
+        $io->success(null === $timesheetEnd ? 'Started timesheet' : 'Created timesheet');
         $io->horizontalTable(array_keys($fields), [$fields]);
 
         return 0;
